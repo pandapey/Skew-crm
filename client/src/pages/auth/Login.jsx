@@ -238,7 +238,7 @@ export default function Login() {
             { }
             <div className="mb-10">
               <img
-                src="/favo.png"
+                src={`${import.meta.env.BASE_URL || '/'}favo.png`}
                 alt="Skew Infotech"
                 className="mx-auto h-24 w-auto drop-shadow-[0_8px_32px_rgba(37,99,235,0.25)]"
                 draggable={false}
