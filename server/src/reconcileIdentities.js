@@ -6,7 +6,7 @@ import { User } from './models/User.js'
 import { Employee } from './models/Employee.js'
 import { STAFF_ROLES, linkUserToEmployee, linkEmployeeToUser } from './services/identityLink.js'
 
-const uri = process.env.MONGODB_URI || 'mongodb+srv://teammate282024_db_user:LJczRHTLAxg5itd2@cluster0.aqys1ru.mongodb.net/Skew?appName=Cluster0'
+const uri = process.env.MONGODB_URI || 'mongodb+srv://teammate282024_db_user:tB6s8YoI4vraB045@cluster0.rrxovbt.mongodb.net/Skew?appName=Cluster0'
 
 async function main() {
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 })
