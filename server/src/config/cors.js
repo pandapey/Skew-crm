@@ -2,7 +2,17 @@ import dotenv from 'dotenv'
 
 dotenv.config()
 
-const normalize = (s) => String(s || '').trim().replace(/\/+$/, '')
+const normalize = (s) => {
+  const t = String(s || '').trim().replace(/\/+$/, '')
+  if (!t) return ''
+  // Browser Origin is scheme+host+port only (no path).
+  // CLIENT_URL may contain subpath like /Demosites/crm — strip to origin so they match.
+  try {
+    return new URL(t).origin
+  } catch {
+    return t
+  }
+}
 
 function getAllowedOrigins() {
   const raw = [
