@@ -271,4 +271,4 @@ export const router = createBrowserRouter([
   { path: '/403', element: <Forbidden /> },
   { path: '/500', element: <ServerError /> },
   { path: '*', element: <NotFound /> },
-], { future: ROUTER_FUTURE })
+], { basename: import.meta.env.BASE_URL?.replace(/\/$/, '') || '/', future: ROUTER_FUTURE })

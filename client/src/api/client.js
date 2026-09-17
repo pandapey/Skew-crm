@@ -5,6 +5,8 @@ import { logout as logoutAction, setTokens as setTokensAction } from '@/redux/sl
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
 
+const getLoginPath = () => `${import.meta.env.BASE_URL || '/'}login`.replace(/\/+/g, '/')
+
 let _token = null
 let _refreshToken = null
 export const setAuthToken = (token, refreshToken) => {
@@ -49,7 +51,7 @@ apiClient.interceptors.response.use(
     if (status === 401 && !original._retry && !_refreshToken) {
       clearAuthToken()
       try { store.dispatch(logoutAction()) } catch {  }
-      if (window.location.pathname !== '/login') window.location.href = '/login'
+      if (window.location.pathname !== getLoginPath()) window.location.href = getLoginPath()
       return Promise.reject(error)
     }
 
@@ -78,7 +80,7 @@ apiClient.interceptors.response.use(
         clearAuthToken()
 
         try { store.dispatch(logoutAction()) } catch {  }
-        if (window.location.pathname !== '/login') window.location.href = '/login'
+        if (window.location.pathname !== getLoginPath()) window.location.href = getLoginPath()
         return Promise.reject(err)
       } finally {
         isRefreshing = false
