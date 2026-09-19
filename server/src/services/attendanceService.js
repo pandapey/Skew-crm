@@ -4,7 +4,7 @@ import { User } from '../models/User.js'
 import { Employee } from '../models/Employee.js'
 import { ApiError } from '../utils/asyncHandler.js'
 import { loadShiftContext, resolveShiftConfig } from '../utils/leaveExpiry.js'
-import { computeTodayStatusMap, ATT_STATUS_ABSENT, ATT_STATUS_ON_LEAVE, ATT_STATUS_NOT_MARKED } from '../utils/attendanceStatus.js'
+import { computeTodayStatusMap, backfillAbsentDays, ATT_STATUS_PRESENT, ATT_STATUS_LATE, ATT_STATUS_EARLY_EXIT, ATT_STATUS_ABSENT, ATT_STATUS_ON_LEAVE, ATT_STATUS_NOT_MARKED } from '../utils/attendanceStatus.js'
 import { countWorkingDays, toDateKey, parseDate } from '../utils/leaveDays.js'
 import { notifyUsersByName } from './notificationService.js'
 import { emitResource } from '../realtime/index.js'
@@ -26,6 +26,12 @@ function openBreakStart(doc) {
 const today = todayIST
 const nowHMS = nowHMSIST
 const nowEpoch = () => Math.floor(Date.now() / 1000)
+
+// ID-first matching with name fallback: empCodes survive renames, so
+// history/summary/calendar keep working after a name change.
+const employeeOrCode = (user) => (user?.empCode
+  ? { $or: [{ employee: user.name }, { empCode: user.empCode }] }
+  : { employee: user.name })
 
 const toMins = (hm) => {
   if (!hm) return 0
@@ -134,7 +140,7 @@ function resolveRange(query = {}) {
 export const attendanceService = {
   async myHistory(user, query) {
     const { status, page = 1, limit = 8 } = query
-    const filter = { employee: user.name }
+    const filter = { ...employeeOrCode(user) }
     if (status) filter.status = status
     const pageNum = Math.max(1, Number(page))
     const limitNum = Math.min(100, Number(limit))
@@ -147,7 +153,7 @@ export const attendanceService = {
 
   async mySummary(user, query = {}) {
     const { from, to } = resolveRange(query)
-    const records = await Attendance.find({ employee: user.name, date: { $gte: from, $lte: to } }).lean()
+    const records = await Attendance.find({ ...employeeOrCode(user), date: { $gte: from, $lte: to } }).lean()
     const worked = records.filter((r) => (r.workingHours || 0) > 0)
     const workingDays = worked.length
     const totalWorked = +worked.reduce((s, r) => s + (r.workingHours || 0), 0).toFixed(1)
@@ -370,16 +376,14 @@ export const attendanceService = {
   },
 
   async calendar(user, query = {}) {
-    const filter = { employee: user.name }
-    const hasRange = ['from', 'to', 'year', 'month'].some(
-      (k) => query[k] != null && query[k] !== ''
-    )
-    if (hasRange) {
-      const { from, to } = resolveRange(query)
-      filter.date = { $gte: from, $lte: to }
-    }
-    const records = await Attendance.find(filter).select('date status -_id').lean()
-    return records.reduce((acc, r) => { acc[r.date] = r.status; return acc }, {})
+    const { from, to } = resolveRange(query)
+    const records = await Attendance.find({ ...employeeOrCode(user), date: { $gte: from, $lte: to } }).select('date status -_id').lean()
+    const map = records.reduce((acc, r) => { acc[r.date] = r.status; return acc }, {})
+    // Absent days never create Attendance records, so backfill unrecorded
+    // elapsed working days as Absent — otherwise the mini calendar stays blank.
+    const holidayDocs = await Holiday.find({ date: { $gte: from, $lte: to } }).select('date -_id').lean()
+    const holidaySet = new Set(holidayDocs.map((h) => toDateKey(h.date)).filter(Boolean))
+    return backfillAbsentDays(map, from, to, holidaySet, today())
   },
 
   async stats(query = {}) {
@@ -399,22 +403,8 @@ export const attendanceService = {
       else if (r.status === 'Late') deptMap[r.department].late++
     })
 
-    const staff = await User.find({ role: { $in: ['Employee', 'Manager'] } })
-      .select('name role -_id').lean()
-    const roleByName = new Map(staff.map((u) => [u.name, u.role]))
-    const roleMap = {}
-    records.forEach((r) => {
-      const role = roleByName.get(r.employee) || 'Unassigned'
-      roleMap[role] ??= { name: role, total: 0, present: 0, absent: 0, late: 0, onLeave: 0 }
-      roleMap[role].total++
-      if (r.status === 'Present') roleMap[role].present++
-      else if (r.status === 'Late') roleMap[role].late++
-      else if (r.status === 'On Leave') roleMap[role].onLeave++
-      else if (r.status === 'Absent') roleMap[role].absent++
-    })
-
     const staffUsers = await User.find({ role: { $in: ['Employee', 'Manager'] } })
-      .select('name shift status -_id').lean()
+      .select('name role shift status -_id').lean()
     const statusMap = await computeTodayStatusMap({
       date, now: new Date(),
       subjects: staffUsers.map((u) => ({
@@ -423,6 +413,24 @@ export const attendanceService = {
     })
     const statusOf = (u) => statusMap.byName.get(u.name) || ATT_STATUS_NOT_MARKED
     const countStatus = (s) => staffUsers.filter((u) => statusOf(u) === s).length
+
+    // Attendance by role — use effective (computed) status so Absent / Late / On Leave
+    // are correct even when no raw Attendance record exists (absent never creates one).
+    // Only Employee + Manager roles (HR role was removed from the project).
+    const roleMap = {}
+    staffUsers
+      .filter((u) => u.status === 'Active')
+      .forEach((u) => {
+        const role = u.role || 'Employee'
+        if (role !== 'Employee' && role !== 'Manager') return
+        roleMap[role] ??= { name: role, total: 0, present: 0, absent: 0, late: 0, onLeave: 0 }
+        roleMap[role].total += 1
+        const st = statusOf(u)
+        if (st === ATT_STATUS_PRESENT || st === ATT_STATUS_EARLY_EXIT) roleMap[role].present += 1
+        else if (st === ATT_STATUS_LATE) roleMap[role].late += 1
+        else if (st === ATT_STATUS_ON_LEAVE) roleMap[role].onLeave += 1
+        else if (st === ATT_STATUS_ABSENT) roleMap[role].absent += 1
+      })
 
     const headcount = staffUsers.filter((u) => u.status === 'Active').length
     const effectiveAbsent = countStatus(ATT_STATUS_ABSENT)

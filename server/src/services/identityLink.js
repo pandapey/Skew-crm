@@ -7,6 +7,52 @@ import { ApiError } from '../utils/asyncHandler.js'
 const empById = (id) =>
   (id && mongoose.isValidObjectId(id)) ? Employee.findById(id) : null
 
+// ---- Stable-identity helpers (name → ID migration) ----------------------
+// Display names change (marriage, corrections) and can collide, so live
+// ownership/assignment matching must work by ID with name as fallback.
+
+export async function resolveStaffIdentity(name) {
+  const key = String(name || '').trim()
+  if (!key) return null
+  const user = await User.findOne({ name: key }).select('_id name empCode employeeId role status').lean()
+  if (!user) return null
+  return {
+    userId: String(user._id),
+    name: user.name,
+    empCode: user.empCode || '',
+    employeeId: user.employeeId || '',
+  }
+}
+
+const objectIdOf = (value) => {
+  try {
+    return value && mongoose.isValidObjectId(value) ? new mongoose.Types.ObjectId(String(value)) : null
+  } catch {
+    return null
+  }
+}
+
+// Builds `{ nameField: name }`, `{ idField: id }`, or `{ $or: [...] }`
+// depending on which parts of the identity are known. Pure — unit-tested.
+export function idOrNameClause(nameField, idField, identity = {}) {
+  const ors = []
+  const oid = objectIdOf(identity.userId)
+  if (oid) ors.push({ [idField]: oid })
+  if (identity.name) ors.push({ [nameField]: identity.name })
+  if (!ors.length) return {}
+  return ors.length === 1 ? ors[0] : { $or: ors }
+}
+
+// True when the doc's stored holder (name and/or ID) matches the user.
+// Pure — unit-tested.
+export function isIdentityHolder(docName, docId, user) {
+  if (!user) return false
+  if (docName && user.name && docName === user.name) return true
+  const uid = user._id ? String(user._id) : null
+  if (uid && docId && String(docId) === uid) return true
+  return false
+}
+
 export const STAFF_ROLES = ['Employee', 'Manager']
 
 export const mapUserStatusToEmployee = (status) => {
@@ -37,9 +83,12 @@ export async function linkUserToEmployee(input) {
     phone: u.phone || EMP_DEFAULTS.phone,
     department: u.department || EMP_DEFAULTS.department,
     designation: u.designation || EMP_DEFAULTS.designation,
-    avatar: u.avatar || '',
     status: mapUserStatusToEmployee(u.status),
   }
+  // Never clobber the linked Employee avatar with '' — an empty User.avatar
+  // means "unchanged", not "remove". Wiping here is what made uploaded
+  // avatars disappear after the next profile/admin sync.
+  if (u.avatar) patch.avatar = u.avatar
 
   if (u.employmentType) patch.employmentType = u.employmentType
   if (u.joiningDate) patch.joiningDate = u.joiningDate
@@ -90,7 +139,6 @@ export async function linkEmployeeToUser(input, { password } = {}) {
     department: emp.department || '',
     designation: emp.designation || '',
     phone: emp.phone || '',
-    avatar: emp.avatar || '',
     status: mapEmployeeStatusToUser(emp.status),
     empCode: emp.empCode || '',
     employeeId: String(emp._id),
@@ -102,6 +150,10 @@ export async function linkEmployeeToUser(input, { password } = {}) {
   }
 
   if (emp.gender === 'Male' || emp.gender === 'Female') base.gender = emp.gender
+  // Same rule as User -> Employee: empty Employee.avatar means "unchanged".
+  // Copying '' here wiped freshly uploaded User avatars on the next
+  // employee self-edit / admin edit.
+  if (emp.avatar) base.avatar = emp.avatar
 
   let credentials = null
   if (user) {

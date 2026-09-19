@@ -6,7 +6,11 @@ import { User } from './models/User.js'
 import { Employee } from './models/Employee.js'
 import { STAFF_ROLES, linkUserToEmployee, linkEmployeeToUser } from './services/identityLink.js'
 
-const uri = process.env.MONGODB_URI || 'mongodb+srv://teammate282024_db_user:tB6s8YoI4vraB045@cluster0.rrxovbt.mongodb.net/Skew?appName=Cluster0'
+const uri = process.env.MONGODB_URI || process.env.MONGO_URI
+if (!uri) {
+  console.error('Set MONGODB_URI (or MONGO_URI) before running the reconciler.')
+  process.exit(1)
+}
 
 async function main() {
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 })

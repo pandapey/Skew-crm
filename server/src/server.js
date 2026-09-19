@@ -2,6 +2,8 @@ import 'dotenv/config'
 process.env.TZ = process.env.TZ || 'Asia/Kolkata'
 import express from 'express'
 import cors from 'cors'
+import helmet from 'helmet'
+import rateLimit from 'express-rate-limit'
 import morgan from 'morgan'
 import dotenv from 'dotenv'
 import path from 'path'
@@ -20,7 +22,6 @@ import attendanceRoutes from './routes/attendanceRoutes.js'
 import leaveRoutes from './routes/leaveRoutes.js'
 import projectRoutes from './routes/projectRoutes.js'
 import financeRoutes from './routes/financeRoutes.js'
-import fileRoutes from './routes/fileRoutes.js'
 import reportRoutes from './routes/reportRoutes.js'
 import notificationRoutes from './routes/notificationRoutes.js'
 import calendarRoutes from './routes/calendarRoutes.js'
@@ -42,6 +43,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
 
 app.set('trust proxy', 1)
+// Avatar / file bytes are loaded cross-origin via <img> (frontend :5173,
+// live Vercel/Netlify domain) from the API origin. Helmet's default
+// `Cross-Origin-Resource-Policy: same-origin` makes browsers block those
+// images after reload (blob: preview works, remote URL 404s in effect).
+// Disable CORP/COEP for this API so GridFS streams are embeddable.
+app.use(helmet({ crossOriginResourcePolicy: false, crossOriginEmbedderPolicy: false }))
 app.use(cors(corsOptions))
 // Explicit preflight handler (Express 4 + cors already handles OPTIONS,
 // this guarantees 204 + headers even if a route is missing).
@@ -60,9 +67,22 @@ app.use(
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'Skew Enterprise Hub API',
+    service: 'Skew Infotech Pvt. Ltd. API',
   })
 })
+
+// Brute-force guard on login: counted per IP. Skipped outside production
+// so local dev/e2e never trip it. Registered before the auth router so it
+// runs first for POST /api/auth/login.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skip: () => process.env.NODE_ENV !== 'production',
+  message: { message: 'Too many login attempts, please try again in 15 minutes.' },
+})
+app.use('/api/auth/login', loginLimiter)
 
 app.use('/api/auth', authRoutes)
 
@@ -94,11 +114,6 @@ app.use(
 app.use(
   '/api/finance',
   withEmit(financeRoutes, 'finance')
-)
-
-app.use(
-  '/api/files',
-  withEmit(fileRoutes, 'files')
 )
 
 app.use('/api/reports', reportRoutes)

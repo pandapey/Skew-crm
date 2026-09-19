@@ -1,7 +1,7 @@
 import mongoose from 'mongoose'
 import { FileItem } from '../models/fileModels.js'
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://teammate282024_db_user:tB6s8YoI4vraB045@cluster0.rrxovbt.mongodb.net/Skew?appName=Cluster0'
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://teammate282024_db_user:LJczRHTLAxg5itd2@cluster0.aqys1ru.mongodb.net/Skew?appName=Cluster0'
 
 await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 8000 })
 

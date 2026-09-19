@@ -223,7 +223,7 @@ export const createUser = asyncHandler(async (req, res) => {
     await Notification.create({
       recipient: user.email,
       type: 'announcement',
-      title: `Welcome to Skew Enterprise Hub, ${String(name).split(' ')[0]}!`,
+      title: `Welcome to Skew Infotech Pvt. Ltd., ${String(name).split(' ')[0]}!`,
       body: `Your ${role} account has been created. Sign in with your email to get started.`,
       sender: actor.name,
       priority: 'normal',

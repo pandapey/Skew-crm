@@ -5,7 +5,7 @@ import { expireStaleRequests } from './leaveService.js'
 import { notifyUsersByEmail } from './notificationService.js'
 import { sendMeetingReminders } from './meetingReminderService.js'
 import {
-  REMINDER_MILESTONES, loadShiftContext, resolveShiftStart, buildExpiryInstant,
+  REMINDER_MILESTONES, buildExpiryInstant,
 } from '../utils/leaveExpiry.js'
 import { systemLog, SYSTEM_LOG_SOURCES } from '../utils/systemLog.js'
 
@@ -48,12 +48,6 @@ export async function sendPendingReminders() {
     .lean()
   const approverEmails = approvers.map((u) => u.email).filter(Boolean)
 
-  const ctx = await loadShiftContext()
-  const { Employee } = await import('../models/Employee.js')
-  const employees = await Employee.find({ name: { $in: pending.map((r) => r.employee) } })
-    .select('name shift')
-    .lean()
-  const shiftByName = new Map(employees.map((e) => [e.name, e.shift]))
   const leadsByEmployee = await projectLeadsFor(pending.map((r) => r.employee))
 
   const allLeadNames = [...new Set([...leadsByEmployee.values()].flatMap((s) => [...s]))]
@@ -68,7 +62,7 @@ export async function sendPendingReminders() {
   for (const req of pending) {
     const deadline = req.expiresAt
       ? new Date(req.expiresAt)
-      : buildExpiryInstant(req.from, resolveShiftStart(shiftByName.get(req.employee), ctx))
+      : buildExpiryInstant(req.to || req.from)
     if (!deadline) continue
 
     const hoursLeft = (deadline.getTime() - now) / MS_PER_HOUR
@@ -100,7 +94,7 @@ export async function sendPendingReminders() {
     await notifyUsersByEmail(recipients, {
       type: 'leave',
       title: `Leave approval reminder \u2014 ${due.label} left`,
-      body: `${req.employee}'s ${req.type} request (${span}, ${req.days} day(s)) is still pending and will expire at the shift start time on ${req.from}.`,
+      body: `${req.employee}'s ${req.type} request (${span}, ${req.days} day(s)) is still pending and will expire at month end.`,
       sender: 'System',
       link: `/leave?request=${req._id}`,
       priority: due.key === '2h' ? 'high' : 'normal',

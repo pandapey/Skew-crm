@@ -38,7 +38,11 @@ export const dashboardStats = asyncHandler(async (req, res) => {
   ])
 
   const fin = await computeFinance({})
-  const att = await computeAttendance({})
+  const _nowForAtt = new Date()
+  const _pad2 = (n) => String(n).padStart(2, '0')
+  const _lastDay = new Date(_nowForAtt.getFullYear(), _nowForAtt.getMonth() + 1, 0).getDate()
+  const _monthPrefix = `${_nowForAtt.getFullYear()}-${_pad2(_nowForAtt.getMonth() + 1)}`
+  const att = await computeAttendance({ from: `${_monthPrefix}-01`, to: `${_monthPrefix}-${_pad2(_lastDay)}` })
   const upcomingFrom = new Date()
   const meetingScope = await meetingVisibilityFilter(req.user)
   const meetingFilter = { start: { $gte: upcomingFrom } }
@@ -160,17 +164,20 @@ const byMonth = (arr, dateFn, valueFns) => {
 }
 
 const byWeek = (arr) => {
-  const m = {}
-  arr.forEach((x) => {
-    if (!x.date) return
-    const day = Number(x.date.slice(8, 10))
-    const w = Math.min(4, Math.floor((day - 1) / 7))
-    const b = (m[w] ||= { week: `Week ${w + 1}`, present: 0, absent: 0, late: 0 })
-    if (x.status === 'Present') b.present += 1
+  const weeks = [0, 1, 2, 3].map((i) => ({ week: `Week ${i + 1}`, present: 0, absent: 0, late: 0 }))
+  ;(arr || []).forEach((x) => {
+    if (!x?.date) return
+    const day = Number(String(x.date).slice(8, 10))
+    if (!Number.isFinite(day) || day < 1) return
+    const w = Math.min(3, Math.floor((day - 1) / 7))
+    const b = weeks[w]
+    if (!b) return
+    if (x.status === 'Present' || x.status === 'Early Exit') b.present += 1
+    else if (x.status === 'Late') { b.present += 1; b.late += 1 }
     else if (x.status === 'Absent' || x.status === 'On Leave') b.absent += 1
-    else if (x.status === 'Late') b.late += 1
   })
-  return Object.keys(m).map(Number).sort((a, b) => a - b).map((i) => ({ ...m[i], week: `Week ${i + 1}` }))
+  // Always return all 4 weeks so Week 2 / Week 4 never disappear when empty
+  return weeks
 }
 
 const byWeekday = (arr) => {

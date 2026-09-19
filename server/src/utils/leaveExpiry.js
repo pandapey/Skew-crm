@@ -79,13 +79,13 @@ export function resolveShiftConfig(candidateNames, ctx = {}) {
   }
 }
 
-export function buildExpiryInstant(fromDate, shiftStartMins) {
-  const day = parseDate(fromDate)
+export function buildExpiryInstant(dateValue) {
+  const day = parseDate(dateValue)
   if (!day) return null
-  const mins = shiftStartMins == null ? parseClock(FALLBACK_SHIFT_START) : shiftStartMins
-  const at = new Date(day.getFullYear(), day.getMonth(), day.getDate())
-  at.setHours(Math.floor(mins / 60), mins % 60, 0, 0)
-  return at
+  // Leave requests expire at 23:59:59 on the last day of the month
+  // containing the final leave day — a request running into the next
+  // month (e.g. 29th → 3rd) expires at the next month's end.
+  return new Date(day.getFullYear(), day.getMonth() + 1, 0, 23, 59, 59, 999)
 }
 
 export async function loadShiftContext() {
@@ -98,5 +98,5 @@ export async function loadShiftContext() {
 
 export function expiryFor(request, ctx, employeeShiftName) {
   if (request.expiresAt) return new Date(request.expiresAt)
-  return buildExpiryInstant(request.from, resolveShiftStart(employeeShiftName, ctx))
+  return buildExpiryInstant(request.to || request.from)
 }

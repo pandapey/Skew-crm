@@ -24,7 +24,7 @@ const toObjectId = (v) =>
   (typeof v === 'string' && HEX24.test(v) ? new mongoose.Types.ObjectId(v) : v)
 
 async function main() {
-  const uri = process.env.MONGO_URI || 'mongodb+srv://teammate282024_db_user:tB6s8YoI4vraB045@cluster0.rrxovbt.mongodb.net/Skew?appName=Cluster0'
+  const uri = process.env.MONGO_URI || 'mongodb+srv://teammate282024_db_user:LJczRHTLAxg5itd2@cluster0.aqys1ru.mongodb.net/Skew?appName=Cluster0'
   await mongoose.connect(uri)
   const db = mongoose.connection.db
   console.log(`Connected to ${db.databaseName}`)

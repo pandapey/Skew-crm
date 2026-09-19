@@ -1,6 +1,7 @@
 import { LeaveRequest, LeaveBalance, LeaveType } from '../models/leaveModels.js'
 import { Holiday, Attendance } from '../models/attendanceModels.js'
 import { Employee } from '../models/Employee.js'
+import { User } from '../models/User.js'
 import { ApiError } from '../utils/asyncHandler.js'
 import {
   resolveLeaveDuration, countSundays, parseDate, SUNDAY, MAX_LEAVE_DAYS_PER_REQUEST,
@@ -8,7 +9,7 @@ import {
   isCapExemptLeaveType, maxDaysForRequest,
 } from '../utils/leaveDays.js'
 import {
-  loadShiftContext, resolveShiftStart, buildExpiryInstant, expiryFor,
+  loadShiftContext, buildExpiryInstant, expiryFor,
 } from '../utils/leaveExpiry.js'
 import { notifyUsersByName } from './notificationService.js'
 
@@ -17,7 +18,30 @@ const daysBetween = (from, to) => resolveLeaveDuration({ from, to }).days
 const withId = (doc) => (doc ? { ...doc, id: String(doc._id) } : doc)
 const withIds = (docs) => docs.map(withId)
 
-function notify(to, subject, body) {
+// empCodes survive renames: match requests by code with name fallback.
+// Pure shape helper — keeps "my" queries working after a name change.
+function withEmployeeFallback(filter, user) {
+  if (!user?.empCode || filter.employee == null) return filter
+  const ors = [{ employee: filter.employee }, { empCode: user.empCode }]
+  delete filter.employee
+  if (filter.$or) {
+    const search = filter.$or
+    delete filter.$or
+    filter.$and = [...(filter.$and || []), { $or: ors }, { $or: search }]
+  } else {
+    filter.$or = ors
+  }
+  return filter
+}
+
+// In-app fan-out to everyone who can approve (Admin/Manager), excluding
+// the applicant. This replaces the old no-op email stub below it.
+async function notifyApprovers(payload, excludeName) {
+  const approvers = await User.find({ role: { $in: ['Admin', 'Manager'] }, status: 'Active' })
+    .select('name -_id')
+    .lean()
+  const names = approvers.map((a) => a.name).filter((n) => n && n !== excludeName)
+  if (names.length) await notifyUsersByName(names, payload)
 }
 
 async function syncAttendanceForApprovedLeave(req) {
@@ -124,7 +148,7 @@ export async function expireStaleRequests() {
             stage: 'Expired',
             by: 'System',
             at: now,
-            note: 'Automatically expired \u2014 no decision was recorded before the shift start time on the first day of leave',
+            note: 'Automatically expired \u2014 no decision was recorded before month end',
           },
         },
       },
@@ -146,8 +170,11 @@ async function assertDatesAreRequestable(user, from, to) {
   }
 
   const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const who = user?.empCode
+    ? { $or: [{ employee: user.name }, { empCode: user.empCode }] }
+    : { employee: user.name }
   const marked = await Attendance.find({
-    employee: user.name,
+    ...who,
     date: { $gte: iso(start), $lte: iso(end) },
   }).select('date status checkIn checkInAt').lean()
 
@@ -170,7 +197,7 @@ async function assertDatesAreRequestable(user, from, to) {
   }
 
   const clashes = await LeaveRequest.find({
-    employee: user.name,
+    ...who,
     status: { $in: ['Pending', 'Approved'] },
     from: { $lte: iso(end) },
     to: { $gte: iso(start) },
@@ -190,7 +217,7 @@ async function availableBalanceFor(user, typeName) {
   const [type, override, approved] = await Promise.all([
     LeaveType.findOne({ name: typeName }).lean(),
     LeaveBalance.findOne({ employee: user.name, type: typeName }).lean(),
-    LeaveRequest.find({ employee: user.name, type: typeName, status: 'Approved' }).select('days').lean(),
+    LeaveRequest.find(withEmployeeFallback({ employee: user.name, type: typeName, status: 'Approved' }, user)).select('days').lean(),
   ])
   if (!type) return 0
   const allocated = override && typeof override.allocated === 'number' && override.allocated > 0
@@ -216,7 +243,7 @@ export const leaveService = {
 
   async myRequests(user, query) {
     await expireStaleRequests()
-    return paginate(buildFilter({ ...query, employee: user.name }), query)
+    return paginate(withEmployeeFallback(buildFilter({ ...query, employee: user.name }), user), query)
   },
 
   async get(id, user) {
@@ -257,13 +284,17 @@ export const leaveService = {
 
     await assertDatesAreRequestable(user, body.from, body.to)
 
-    const balance = await LeaveBalance.findOne({ employee: user.name, type: body.type })
-    if (balance && balance.balance < days) {
-      throw new ApiError(422, `Insufficient balance: ${balance.balance} day(s) available, ${days} requested`)
-    }
-
     const type = await LeaveType.findOne({ name: body.type })
     if (!type) throw new ApiError(422, `Unknown leave type: ${body.type}`)
+
+    // Enforce allocation for paid leave (override-aware via availableBalanceFor).
+    // Unpaid types are intentionally unlimited — payroll prices them separately.
+    if (type.paid !== false) {
+      const available = await availableBalanceFor(user, body.type)
+      if (days > available) {
+        throw new ApiError(422, `Insufficient balance: ${available} day(s) available, ${days} requested`)
+      }
+    }
 
     if (!canSeeLeaveType(type, user)) {
       throw new ApiError(
@@ -284,12 +315,8 @@ export const leaveService = {
         ? `Leave request submitted \u2014 ${sundaysExcluded} Sunday(s) excluded from the duration`
         : 'Leave request submitted'
 
-    const ctx = await loadShiftContext()
-    const shifts = await employeeShiftMap([user.name])
-    const expiresAt = buildExpiryInstant(
-      body.from,
-      resolveShiftStart(shifts.get(user.name) || user.shift, ctx),
-    )
+    // Leave requests expire at month end (month of the last leave day).
+    const expiresAt = buildExpiryInstant(body.to || body.from)
 
     const req = await LeaveRequest.create({
       employee: user.name, empCode: user.empCode, department: user.department,
@@ -299,25 +326,35 @@ export const leaveService = {
       expiresAt,
       workflow: [{ stage: 'Applied', by: user.name, note: appliedNote }],
     })
-    notify('hr@skew.com', 'New leave request', `${user.name} applied for ${days} day(s) of ${body.type}`)
+    notifyApprovers({
+      type: 'leave',
+      title: 'New leave request',
+      body: `${user.name} applied for ${days} day(s) of ${body.type} (${body.from === body.to ? body.from : `${body.from} to ${body.to}`}).`,
+      sender: user.name,
+      link: `/leave?request=${req._id}`,
+      priority: 'high',
+    }, user.name).catch(() => {})
     return withId(req.toObject())
   },
 
-  async hourlyUsage(employeeName, month) {
+  async hourlyUsage(employeeName, month, empCode = null) {
     const bounds = monthBounds(month)
     if (!bounds) return 0
-    const rows = await LeaveRequest.find({
-      employee: employeeName,
+    const base = {
       requestKind: 'Hourly Permission',
       status: { $in: ['Pending', 'Approved'] },
       from: { $gte: bounds.start, $lte: bounds.end },
-    }).select('hours').lean()
+    }
+    const filter = empCode
+      ? { ...base, $or: [{ employee: employeeName }, { empCode }] }
+      : { ...base, employee: employeeName }
+    const rows = await LeaveRequest.find(filter).select('hours').lean()
     return rows.reduce((sum, r) => sum + (Number(r.hours) || 0), 0)
   },
 
   async hourlyBalance(user, month) {
     const key = /^\d{4}-\d{2}$/.test(String(month || '')) ? String(month) : monthKeyOf(new Date())
-    const used = await this.hourlyUsage(user.name, key)
+    const used = await this.hourlyUsage(user.name, key, user.empCode)
     const allowance = HOURLY_PERMISSION_MONTHLY_HOURS
     return {
       month: key,
@@ -352,7 +389,7 @@ export const leaveService = {
     await assertDatesAreRequestable(user, date, date)
 
     const month = monthKeyOf(date)
-    const used = await this.hourlyUsage(user.name, month)
+    const used = await this.hourlyUsage(user.name, month, user.empCode)
     const remaining = HOURLY_PERMISSION_MONTHLY_HOURS - used
     if (hours > remaining) {
       throw new ApiError(
@@ -361,12 +398,7 @@ export const leaveService = {
       )
     }
 
-    const ctx = await loadShiftContext()
-    const shifts = await employeeShiftMap([user.name])
-    const expiresAt = buildExpiryInstant(
-      date,
-      resolveShiftStart(shifts.get(user.name) || user.shift, ctx),
-    )
+    const expiresAt = buildExpiryInstant(date)
 
     const req = await LeaveRequest.create({
       employee: user.name, empCode: user.empCode, department: user.department,
@@ -385,7 +417,14 @@ export const leaveService = {
       }],
     })
 
-    notify('hr@skew.com', 'New hourly permission request', `${user.name} requested ${hours}h of permission on ${date}`)
+    notifyApprovers({
+      type: 'leave',
+      title: 'New hourly permission request',
+      body: `${user.name} requested ${hours}h of permission on ${date}.`,
+      sender: user.name,
+      link: `/leave?request=${req._id}`,
+      priority: 'high',
+    }, user.name).catch(() => {})
     return withId(req.toObject())
   },
 
@@ -399,16 +438,24 @@ export const leaveService = {
     const req = await LeaveRequest.findById(id)
     if (!req) throw new ApiError(404, 'Leave request not found')
     if (req.status === 'Expired') {
-      throw new ApiError(409, 'This request expired because it was not actioned before the shift start time on the first day of leave. It can no longer be approved or rejected.')
+      throw new ApiError(409, 'This request expired because it was not actioned before month end. It can no longer be approved or rejected.')
     }
     if (req.status !== 'Pending') throw new ApiError(409, `Request already ${req.status.toLowerCase()}`)
 
     const status = action === 'approve' ? 'Approved' : 'Rejected'
 
     if (status === 'Approved' && req.requestKind !== 'Hourly Permission') {
+      // Re-check allocation at decision time (balances may have moved since apply).
+      const reqType = await LeaveType.findOne({ name: req.type }).lean()
+      if (reqType && reqType.paid !== false) {
+        const reqUser = await User.findOne({ name: req.employee }).select('name empCode').lean()
+        const available = await availableBalanceFor(
+          { name: req.employee, empCode: reqUser?.empCode }, req.type,
+        )
+        if (available < req.days) throw new ApiError(422, 'Insufficient balance to approve')
+      }
       const balance = await LeaveBalance.findOne({ employee: req.employee, type: req.type })
       if (balance) {
-        if (balance.balance < req.days) throw new ApiError(422, 'Insufficient balance to approve')
         balance.used += req.days
         balance.balance -= req.days
         await balance.save()
@@ -427,8 +474,6 @@ export const leaveService = {
         console.error('syncAttendanceForApprovedLeave failed:', err?.message)
       })
     }
-
-    notify(req.employee, `Leave ${status}`, `Your ${req.type} request was ${status.toLowerCase()} by ${approver}`)
 
     const isHourly = req.requestKind === 'Hourly Permission'
     const label = isHourly
@@ -468,13 +513,56 @@ export const leaveService = {
   async remove(id) {
     const doc = await LeaveRequest.findByIdAndDelete(id)
     if (!doc) throw new ApiError(404, 'Leave request not found')
+    // Undo approval side-effects so balances/attendance stay consistent.
+    if (doc.status === 'Approved' && doc.requestKind !== 'Hourly Permission' && (doc.days || 0) > 0) {
+      const balance = await LeaveBalance.findOne({ employee: doc.employee, type: doc.type })
+      if (balance) {
+        balance.used = Math.max(0, (balance.used || 0) - doc.days)
+        balance.balance = (balance.balance || 0) + doc.days
+        await balance.save().catch(() => {})
+      }
+      // Remove the auto-created On Leave attendance rows (only untouched ones).
+      const dates = []
+      if (doc.halfDay) {
+        dates.push(doc.from)
+      } else {
+        const a = parseDate(doc.from)
+        const b = parseDate(doc.to)
+        if (a && b) {
+          a.setHours(0, 0, 0, 0)
+          b.setHours(0, 0, 0, 0)
+          const cursor = new Date(a)
+          while (cursor <= b) {
+            if (cursor.getDay() !== SUNDAY) {
+              const y = cursor.getFullYear()
+              const m = String(cursor.getMonth() + 1).padStart(2, '0')
+              const d = String(cursor.getDate()).padStart(2, '0')
+              dates.push(`${y}-${m}-${d}`)
+            }
+            cursor.setDate(cursor.getDate() + 1)
+          }
+        }
+      }
+      if (dates.length) {
+        await Attendance.deleteMany({
+          employee: doc.employee,
+          date: { $in: dates },
+          status: 'On Leave',
+          checkIn: null,
+          checkOut: null,
+        }).catch(() => {})
+      }
+    }
     return { id }
   },
 
   async balances(user) {
+    const decidedFilter = withEmployeeFallback(
+      { employee: user.name, status: { $in: ['Approved', 'Pending'] } }, user,
+    )
     const [allTypes, decided, overrides] = await Promise.all([
       LeaveType.find({ active: { $ne: false } }).sort({ name: 1 }).lean(),
-      LeaveRequest.find({ employee: user.name, status: { $in: ['Approved', 'Pending'] } }).lean(),
+      LeaveRequest.find(decidedFilter).lean(),
       LeaveBalance.find({ employee: user.name }).lean(),
     ])
     const approved = decided.filter((r) => r.status === 'Approved')

@@ -106,11 +106,26 @@ const DESIGNATION_BY_DEPT = {
 const DEPARTMENTS = ['Engineering', 'Sales', 'Human Resources', 'Finance', 'Marketing', 'Design', 'Operations', 'Support', 'Legal']
 
 async function seed() {
+  // DANGER: this wipes every collection below. Never run against production
+  // by accident — production requires an explicit opt-in.
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED !== 'true') {
+    console.error('Refusing to run seed in production. Set ALLOW_SEED=true to override.');
+    process.exit(1);
+  }
+  // Override the well-known demo passwords via env (recommended everywhere
+  // except throwaway local dev).
+  const seedPassword = process.env.SEED_PASSWORD;
+  const usersToCreate = seedPassword
+    ? users.map((u) => ({ ...u, password: seedPassword }))
+    : users;
+  if (!seedPassword) {
+    console.warn('Using default demo passwords — set SEED_PASSWORD to override them.');
+  }
   await connectDB(process.env.MONGO_URI)
   await ensureIndexes()
 
   await User.deleteMany({})
-  for (const u of users) await User.create(u)
+  for (const u of usersToCreate) await User.create(u)
   const userDocs = await User.find({})
   console.log(` Seeded ${userDocs.length} users`)
 
@@ -347,7 +362,7 @@ async function seed() {
 
   await ClientAnnouncement.insertMany(Array.from({ length: 20 }, (_, i) => ({
     title: pick(['New Feature Released', 'Scheduled Maintenance', 'Holiday Hours', 'Security Update', 'Product Webinar', 'Policy Change'], i),
-    body: 'We are pleased to share an update regarding your engagement with Skew Enterprise Hub.',
+    body: 'We are pleased to share an update regarding your engagement with Skew Infotech Pvt. Ltd.',
     date: fdate(2026, 7 + (i % 3), 1 + (i % 27)),
     tag: pick(['Update', 'Announcement', 'Event', 'Maintenance'], i), pinned: i % 6 === 0,
   })))

@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import { Project, Sprint, Milestone, ProjectFile, ProjectActivity } from '../models/projectModels.js'
 import { createResourceService } from '../services/resourceFactory.js'
-import { projectService as svc, syncClientProject, createProjectWithClient, recordProjectAdvance, withId, withIds, hasProjectAccess, projectQueryScope, PROJECT_FULL_ACCESS, resolveProjectRef } from '../services/projectService.js'
+import { projectService as svc, syncClientProject, createProjectWithClient, recordProjectAdvance, withId,
+  withIds, hasProjectAccess, projectQueryScope, PROJECT_FULL_ACCESS, resolveProjectRef, attachProjectIdentityIds } from
+  '../services/projectService.js'
 import { projectValidators } from '../validators/projectValidators.js'
 import { asyncHandler, ApiError } from '../utils/asyncHandler.js'
 import { protect, authorize, blockClient } from '../middleware/auth.js'
@@ -271,10 +273,12 @@ router.get('/:id/documents/:docId/download', asyncHandler(async (req, res) => {
 router.get('/files/:fileId/download', asyncHandler(async (req, res) => {
   const pf = await ProjectFile.findById(req.params.fileId).lean()
   if (!pf) throw new ApiError(404, 'File not found')
-  // access check: must have project access
-  const { resolveProjectRef, hasProjectAccess } = await import('../services/projectService.js')
-  const project = await resolveProjectRef(String(pf.project))
-  if (!project || !(await hasProjectAccess(project, req.user))) throw new ApiError(403, 'No access to this project')
+  // access check: must have project access (General Task files have project=null)
+  if (pf.project) {
+    const { resolveProjectRef, hasProjectAccess } = await import('../services/projectService.js')
+    const project = await resolveProjectRef(String(pf.project))
+    if (!project || !(await hasProjectAccess(project, req.user))) throw new ApiError(403, 'No access to this project')
+  }
   const { streamGridFSFile, isGridFsId } = await import('../utils/mongoStorage.js')
   if (pf.fileId && isGridFsId(pf.fileId)) {
     return streamGridFSFile(pf.fileId, res, {
@@ -300,8 +304,14 @@ router.get('/', asyncHandler(async (req, res) => res.json(await svc.listScoped(r
 router.get('/all', asyncHandler(async (req, res) => res.json(await svc.allScoped(req.user))))
 router.get('/:id', asyncHandler(async (req, res) => res.json(await svc.getScoped(req.params.id, req.user))))
 router.post('/', canWrite, projectValidators.project, asyncHandler(async (req, res) => {
-  const created = await projectStore.create(req.body)
+  // Client must not spoof stable identity refs — they are resolved server-side.
+  const { leadId: _leadId, ...reqBody } = req.body || {}
+  if (Array.isArray(reqBody.members)) {
+    reqBody.members = reqBody.members.map(({ userId: _u, ...m }) => m)
+  }
+  const created = await projectStore.create(reqBody)
   const obj = created.toObject ? created.toObject() : created
+  await attachProjectIdentityIds(created._id || created)
   await svc.notifyProjectCreated(obj, req.user?.name || 'System')
   await syncClientProject(obj, req.user?.name || 'System').catch(() => {})
   await recordProjectAdvance({
@@ -317,8 +327,13 @@ router.put('/:id', canWrite, asyncHandler(async (req, res) => {
   const resolved = await resolveProjectRef(req.params.id)
   if (!resolved) throw new ApiError(404, 'Project not found')
   const before = await Project.findById(resolved._id).lean()
-  const updated = await projectStore.update(resolved._id, req.body)
+  const { leadId: _leadId2, ...reqPatch } = req.body || {}
+  if (Array.isArray(reqPatch.members)) {
+    reqPatch.members = reqPatch.members.map(({ userId: _u, ...m }) => m)
+  }
+  const updated = await projectStore.update(resolved._id, reqPatch)
   const obj = updated.toObject ? updated.toObject() : updated
+  await attachProjectIdentityIds(resolved._id)
   if (before) await svc.notifyMembersChanged(before, obj, req.user?.name || 'System')
   await syncClientProject(obj, req.user?.name || 'System').catch(() => {})
   res.json(withId(obj))
